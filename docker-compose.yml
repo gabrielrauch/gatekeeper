@@ -1,0 +1,15 @@
+services:
+  gatekeeper:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config:/config:ro
+    depends_on:
+      - upstream-http
+
+  upstream-http:
+    image: hashicorp/http-echo
+    command: ["-text=ok", "-listen=:3000"]
+    ports:
+      - "3000:3000"
