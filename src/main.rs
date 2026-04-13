@@ -1,4 +1,13 @@
-use gatekeeper::config::Config;
+mod algorithm;
+mod config;
+mod health;
+mod identity;
+mod metrics;
+mod middleware;
+mod proxy;
+mod response;
+mod server;
+mod store;
 
 fn main() {
     tracing_subscriber::fmt()
@@ -16,7 +25,7 @@ fn main() {
         .map(|w| w[1].clone())
         .unwrap_or_else(|| "config/gatekeeper.toml".to_string());
 
-    let cfg = match Config::from_file(&config_path) {
+    let cfg = match config::Config::from_file(&config_path) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("error: {e}");
@@ -27,12 +36,12 @@ fn main() {
     tracing::info!(
         listen = %cfg.server.listen,
         upstream_url = %cfg.server.upstream_url,
-        algorithm = %cfg.defaults.algorithm,
         capacity = cfg.defaults.capacity,
+        refill_rate = cfg.defaults.refill_rate,
         "Gatekeeper starting"
     );
 
     tokio::runtime::Runtime::new()
         .expect("failed to create tokio runtime")
-        .block_on(gatekeeper::server::run(cfg));
+        .block_on(server::run(cfg));
 }

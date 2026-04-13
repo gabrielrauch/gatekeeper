@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::OnceLock;
 use std::task::{Context, Poll};
 
 use axum::body::Body;
@@ -12,10 +13,16 @@ use tower::{Layer, Service};
 // init_prometheus
 // ---------------------------------------------------------------------------
 
+static PROMETHEUS_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
+
 pub fn init_prometheus() -> PrometheusHandle {
-    PrometheusBuilder::new()
-        .install_recorder()
-        .expect("failed to install Prometheus recorder")
+    PROMETHEUS_HANDLE
+        .get_or_init(|| {
+            PrometheusBuilder::new()
+                .install_recorder()
+                .expect("failed to install Prometheus recorder")
+        })
+        .clone()
 }
 
 // ---------------------------------------------------------------------------

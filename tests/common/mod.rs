@@ -49,10 +49,13 @@ pub async fn spawn_mock_upstream() -> String {
     format!("http://{addr}")
 }
 
-/// Spawn a gatekeeper proxy pointed at `upstream_url`.
-/// Uses high capacity to effectively disable rate limiting.
-/// Returns the base URL of the proxy.
-pub async fn spawn_gatekeeper_proxy_only(upstream_url: String) -> String {
+/// Spawn a full Gatekeeper instance with configurable rate limiting.
+/// Returns the SocketAddr of the bound listener.
+pub async fn spawn_gatekeeper(
+    upstream_url: String,
+    capacity: u64,
+    refill_rate: f64,
+) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
@@ -64,8 +67,8 @@ pub async fn spawn_gatekeeper_proxy_only(upstream_url: String) -> String {
         },
         defaults: DefaultsConfig {
             algorithm: "token_bucket".to_string(),
-            capacity: 1_000_000,
-            refill_rate: 1_000_000.0,
+            capacity,
+            refill_rate,
             cost: 1,
             fail_mode: FailMode::Open,
         },
@@ -85,5 +88,13 @@ pub async fn spawn_gatekeeper_proxy_only(upstream_url: String) -> String {
         .unwrap();
     });
 
+    addr
+}
+
+/// Spawn a gatekeeper proxy pointed at `upstream_url`.
+/// Uses high capacity to effectively disable rate limiting.
+/// Returns the base URL of the proxy.
+pub async fn spawn_gatekeeper_proxy_only(upstream_url: String) -> String {
+    let addr = spawn_gatekeeper(upstream_url, 100_000, 100_000.0).await;
     format!("http://{addr}")
 }
