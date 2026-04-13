@@ -4,6 +4,7 @@ pub mod health;
 pub mod identity;
 pub mod metrics;
 pub mod middleware;
+pub mod policy;
 pub mod proxy;
 pub mod response;
 pub mod server;

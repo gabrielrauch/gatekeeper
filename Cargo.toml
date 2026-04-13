@@ -24,6 +24,7 @@ metrics = "0.23"
 metrics-exporter-prometheus = "0.15"
 thiserror = "2"
 async-trait = "0.1"
+ipnet = "2"
 
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }

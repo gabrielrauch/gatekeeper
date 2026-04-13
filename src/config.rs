@@ -1,3 +1,4 @@
+use ipnet::IpNet;
 use serde::{Deserialize, Deserializer};
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -41,6 +42,41 @@ pub struct Config {
     pub server: ServerConfig,
     pub defaults: DefaultsConfig,
     pub store: StoreConfig,
+    #[serde(default)]
+    pub access: AccessConfig,
+    #[serde(default)]
+    pub policy: Vec<PolicyConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct AccessConfig {
+    #[serde(default)]
+    pub allowlist_ips: Vec<String>,
+    #[serde(default)]
+    pub allowlist_keys: Vec<String>,
+    #[serde(default)]
+    pub denylist_ips: Vec<String>,
+    #[serde(default)]
+    pub denylist_keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PolicyConfig {
+    pub name: String,
+    #[serde(rename = "match")]
+    pub match_rule: MatchRule,
+    pub algorithm: Option<String>,
+    pub capacity: Option<u64>,
+    pub refill_rate: Option<f64>,
+    pub cost: Option<u64>,
+    pub identify_by: Option<String>,
+    pub bypass: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MatchRule {
+    pub path: String,
+    pub methods: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -178,6 +214,62 @@ impl Config {
             .map_err(|e| {
                 ConfigError::Validation(format!("invalid upstream_url '{}': {e}", self.server.upstream_url))
             })?;
+
+        // Validate policies
+        let mut seen_names = std::collections::HashSet::new();
+        for policy in &self.policy {
+            if policy.name.is_empty() {
+                return Err(ConfigError::Validation(
+                    "policy name must not be empty".to_string(),
+                ));
+            }
+            if !seen_names.insert(policy.name.clone()) {
+                return Err(ConfigError::Validation(format!(
+                    "duplicate policy name '{}'",
+                    policy.name
+                )));
+            }
+            if let Some(ref algorithm) = policy.algorithm {
+                if algorithm != "token_bucket" {
+                    return Err(ConfigError::Validation(format!(
+                        "policy '{}': unsupported algorithm '{}'; must be 'token_bucket'",
+                        policy.name, algorithm
+                    )));
+                }
+            }
+            if let Some(ref identify_by) = policy.identify_by {
+                if identify_by != "ip" {
+                    return Err(ConfigError::Validation(format!(
+                        "policy '{}': unsupported identify_by '{}'; must be 'ip'",
+                        policy.name, identify_by
+                    )));
+                }
+            }
+            if let Some(capacity) = policy.capacity {
+                if capacity == 0 {
+                    return Err(ConfigError::Validation(format!(
+                        "policy '{}': capacity must be greater than 0",
+                        policy.name
+                    )));
+                }
+            }
+            if let Some(refill_rate) = policy.refill_rate {
+                if refill_rate <= 0.0 {
+                    return Err(ConfigError::Validation(format!(
+                        "policy '{}': refill_rate must be greater than 0",
+                        policy.name
+                    )));
+                }
+            }
+        }
+
+        // Validate access IP lists
+        for ip in self.access.allowlist_ips.iter().chain(self.access.denylist_ips.iter()) {
+            ip.parse::<IpNet>().map_err(|e| {
+                ConfigError::Validation(format!("invalid IP/CIDR '{}': {e}", ip))
+            })?;
+        }
+
         Ok(())
     }
 }
@@ -316,5 +408,153 @@ refill_rate = 10.0
         let err = parse(toml).expect_err("invalid upstream_url should fail validation");
         assert!(matches!(err, ConfigError::Validation(_)));
         assert!(err.to_string().contains("upstream_url"));
+    }
+
+    #[test]
+    fn parses_config_with_policies() {
+        let toml = r#"
+[server]
+listen = "127.0.0.1:8080"
+upstream_url = "http://localhost:3000"
+
+[defaults]
+capacity = 100
+refill_rate = 10.0
+
+[store.memory]
+
+[access]
+allowlist_ips = ["10.0.0.0/8", "192.168.1.0/24"]
+denylist_ips = ["203.0.113.0/24"]
+
+[[policy]]
+name = "api-strict"
+algorithm = "token_bucket"
+capacity = 50
+refill_rate = 5.0
+cost = 2
+identify_by = "ip"
+bypass = false
+
+[policy.match]
+path = "/api/*"
+methods = ["GET", "POST"]
+
+[[policy]]
+name = "health-bypass"
+bypass = true
+
+[policy.match]
+path = "/health"
+"#;
+        let cfg = parse(toml).expect("config with policies should parse");
+        assert_eq!(cfg.policy.len(), 2);
+        assert_eq!(cfg.policy[0].name, "api-strict");
+        assert_eq!(cfg.policy[0].match_rule.path, "/api/*");
+        assert_eq!(cfg.policy[0].match_rule.methods, Some(vec!["GET".to_string(), "POST".to_string()]));
+        assert_eq!(cfg.policy[0].capacity, Some(50));
+        assert_eq!(cfg.policy[0].refill_rate, Some(5.0));
+        assert_eq!(cfg.policy[0].cost, Some(2));
+        assert_eq!(cfg.policy[0].bypass, Some(false));
+        assert_eq!(cfg.policy[1].name, "health-bypass");
+        assert_eq!(cfg.policy[1].bypass, Some(true));
+        assert!(cfg.policy[1].match_rule.methods.is_none());
+        assert_eq!(cfg.access.allowlist_ips, vec!["10.0.0.0/8", "192.168.1.0/24"]);
+        assert_eq!(cfg.access.denylist_ips, vec!["203.0.113.0/24"]);
+    }
+
+    #[test]
+    fn validates_duplicate_policy_names() {
+        let toml = r#"
+[server]
+listen = "127.0.0.1:8080"
+upstream_url = "http://localhost:3000"
+
+[defaults]
+capacity = 100
+refill_rate = 10.0
+
+[store.memory]
+
+[[policy]]
+name = "dup"
+
+[policy.match]
+path = "/a"
+
+[[policy]]
+name = "dup"
+
+[policy.match]
+path = "/b"
+"#;
+        let err = parse(toml).expect_err("duplicate policy names should fail");
+        assert!(matches!(err, ConfigError::Validation(_)));
+        assert!(err.to_string().contains("duplicate"));
+    }
+
+    #[test]
+    fn validates_unsupported_algorithm() {
+        let toml = r#"
+[server]
+listen = "127.0.0.1:8080"
+upstream_url = "http://localhost:3000"
+
+[defaults]
+capacity = 100
+refill_rate = 10.0
+
+[store.memory]
+
+[[policy]]
+name = "bad-algo"
+algorithm = "sliding_window"
+
+[policy.match]
+path = "/api/*"
+"#;
+        let err = parse(toml).expect_err("unsupported algorithm should fail");
+        assert!(matches!(err, ConfigError::Validation(_)));
+        assert!(err.to_string().contains("algorithm"));
+    }
+
+    #[test]
+    fn validates_invalid_cidr() {
+        let toml = r#"
+[server]
+listen = "127.0.0.1:8080"
+upstream_url = "http://localhost:3000"
+
+[defaults]
+capacity = 100
+refill_rate = 10.0
+
+[store.memory]
+
+[access]
+denylist_ips = ["not-an-ip"]
+"#;
+        let err = parse(toml).expect_err("invalid CIDR should fail");
+        assert!(matches!(err, ConfigError::Validation(_)));
+        assert!(err.to_string().contains("not-an-ip"));
+    }
+
+    #[test]
+    fn empty_policies_is_valid() {
+        let toml = r#"
+[server]
+listen = "127.0.0.1:8080"
+upstream_url = "http://localhost:3000"
+
+[defaults]
+capacity = 100
+refill_rate = 10.0
+
+[store.memory]
+"#;
+        let cfg = parse(toml).expect("no policies should be valid");
+        assert!(cfg.policy.is_empty());
+        assert!(cfg.access.allowlist_ips.is_empty());
+        assert!(cfg.access.denylist_ips.is_empty());
     }
 }

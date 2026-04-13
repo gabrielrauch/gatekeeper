@@ -331,6 +331,7 @@ dependencies = [
  "humantime",
  "hyper",
  "hyper-util",
+ "ipnet",
  "metrics",
  "metrics-exporter-prometheus",
  "reqwest",
