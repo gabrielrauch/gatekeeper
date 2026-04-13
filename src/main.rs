@@ -4,6 +4,7 @@ mod health;
 mod identity;
 mod metrics;
 mod middleware;
+mod policy;
 mod proxy;
 mod response;
 mod server;

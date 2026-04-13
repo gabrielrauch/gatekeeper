@@ -13,11 +13,11 @@ use hyper::Request;
 use metrics_exporter_prometheus::PrometheusHandle;
 use tower_http::trace::TraceLayer;
 
-use crate::algorithm::token_bucket::TokenBucket;
 use crate::config::Config;
-use crate::identity::ip::IpExtractor;
 use crate::metrics::{init_prometheus, MetricsLayer};
+use crate::middleware::access_control::{AccessControl, AccessControlLayer};
 use crate::middleware::rate_limit::RateLimitLayer;
+use crate::policy::PolicyEngine;
 use crate::proxy::http::HttpProxy;
 use crate::proxy::ProxyHandler;
 use crate::response::ResponseHeaderLayer;
@@ -48,23 +48,18 @@ pub fn build_app(config: Arc<Config>) -> Router {
     let eviction_interval = config.store.memory.eviction_interval;
     store.start_eviction_task(eviction_interval, ttl);
 
-    // 5. Create TokenBucket limiter
-    let limiter = Arc::new(TokenBucket::new(
-        Arc::clone(&store),
-        config.defaults.capacity,
-        config.defaults.refill_rate,
-    ));
+    // 5. Create PolicyEngine
+    let policy_engine = PolicyEngine::new(&config, store.clone());
 
-    // 6. Create IpExtractor
-    let extractor = Arc::new(IpExtractor);
-
-    // 7. Create RateLimitLayer
+    // 6. Create RateLimitLayer
     let rate_limit_layer = RateLimitLayer::new(
-        limiter,
-        extractor,
+        Arc::new(policy_engine),
         config.defaults.fail_mode.clone(),
-        config.defaults.cost,
     );
+
+    // 7. Create AccessControlLayer
+    let access_control = AccessControl::from_config(&config.access);
+    let access_layer = AccessControlLayer::new(access_control);
 
     let state = AppState {
         config,
@@ -73,14 +68,16 @@ pub fn build_app(config: Arc<Config>) -> Router {
         prometheus_handle,
     };
 
-    // 8. Build proxy router with rate limiting.
-    // Layer order: rate_limit_layer is applied first (inner), ResponseHeaderLayer is outer.
-    // On the response path: rate_limit inserts Decision into extensions, then
-    // ResponseHeaderLayer reads it and injects x-ratelimit-* headers.
+    // 8. Build proxy router with rate limiting and access control.
+    // Layer order (outermost to innermost):
+    //   access_layer → rate_limit_layer → ResponseHeaderLayer → proxy_handler
+    // On request path: access_layer runs first (deny/allowlist), then rate_limit, then proxy.
+    // On response path: ResponseHeaderLayer injects x-ratelimit-* headers.
     let proxy_router: Router<AppState> = Router::new()
         .fallback(proxy_handler)
         .layer(rate_limit_layer)
-        .layer(ResponseHeaderLayer);
+        .layer(ResponseHeaderLayer)
+        .layer(access_layer);
 
     // 9. Build main router: health + metrics bypass rate limiting, proxy is rate-limited
     Router::new()

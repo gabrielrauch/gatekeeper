@@ -12,7 +12,8 @@ use axum::{
 use tokio::net::TcpListener;
 
 use gatekeeper::config::{
-    Config, DefaultsConfig, FailMode, MemoryStoreConfig, ProxyConfig, ServerConfig, StoreConfig,
+    AccessConfig, Config, DefaultsConfig, FailMode, MemoryStoreConfig, PolicyConfig, ProxyConfig,
+    ServerConfig, StoreConfig,
 };
 
 /// Spawn a mock upstream server.
@@ -42,6 +43,9 @@ pub async fn spawn_mock_upstream() -> String {
             get(|| async { StatusCode::CREATED.into_response() }),
         );
 
+    // Catch-all for any other path → 200
+    let app = app.fallback(|| async { (StatusCode::OK, "upstream-ok") });
+
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
@@ -49,12 +53,14 @@ pub async fn spawn_mock_upstream() -> String {
     format!("http://{addr}")
 }
 
-/// Spawn a full Gatekeeper instance with configurable rate limiting.
+/// Spawn a full Gatekeeper instance with configurable rate limiting and policies.
 /// Returns the SocketAddr of the bound listener.
-pub async fn spawn_gatekeeper(
+pub async fn spawn_gatekeeper_with_policies(
     upstream_url: String,
     capacity: u64,
     refill_rate: f64,
+    policies: Vec<PolicyConfig>,
+    access: AccessConfig,
 ) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -75,6 +81,8 @@ pub async fn spawn_gatekeeper(
         store: StoreConfig {
             memory: MemoryStoreConfig::default(),
         },
+        access,
+        policy: policies,
     });
 
     let app = gatekeeper::server::build_app(config);
@@ -89,6 +97,23 @@ pub async fn spawn_gatekeeper(
     });
 
     addr
+}
+
+/// Spawn a full Gatekeeper instance with configurable rate limiting.
+/// Returns the SocketAddr of the bound listener.
+pub async fn spawn_gatekeeper(
+    upstream_url: String,
+    capacity: u64,
+    refill_rate: f64,
+) -> SocketAddr {
+    spawn_gatekeeper_with_policies(
+        upstream_url,
+        capacity,
+        refill_rate,
+        vec![],
+        AccessConfig::default(),
+    )
+    .await
 }
 
 /// Spawn a gatekeeper proxy pointed at `upstream_url`.
